@@ -1,0 +1,181 @@
+//MUDAR EXTENSÃO DO ARQUIVO PARA .TF
+
+
+terraform {
+  required_version = ">= 0.12" //primeira coisa é declarar a versão do terraform
+
+  //required providers é responsável pelo provider do nosso serviço de cloud
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.55.0"
+    }
+  }
+}
+
+//precisamos declarar um provider
+
+provider "azurerm" {
+  features {}
+}
+
+//agora precisamos declarar um grupo de recursos para utilizarmos os nossos serviços
+// ou o resource_group
+//para isso, podemos pesquisar terraform azurem resource group.
+
+
+//rg-terraform-cloud seria o nome do grupo de recursos, recomendado usar ambos iguais para não nos confundirmos.
+resource "azurerm_resource_group" "rg-terraform-cloud" {
+  name     = "rg-terraform-cloud"
+  location = "eastus"
+}
+
+//precisamos criar um endereço virtual para nossa máquina virtual
+# vide abaixo : https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/virtual_network
+resource "azurerm_virtual_network" "vnet-terraform-cloud" {
+  name = "vnet-terraform-cloud"
+  #location            = azurerm_resource_group.example.location //devemos trocar o example pelo nome do nosso recurso.
+  location            = azurerm_resource_group.rg-terraform-cloud.location
+  resource_group_name = azurerm_resource_group.rg-terraform-cloud.name
+  address_space       = ["10.0.0.0/16"]
+
+  tags = {
+    environment = "Production"
+  }
+}
+
+//precisamos criar agora uma sub-rede para nossa vm
+//link: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/subnet
+
+//mesmo passo a passo acima, visualizar o que se pede abaixo como resource_group e virtual_network
+//e alterar os campos 'example' pelo nome apropriado
+resource "azurerm_subnet" "sub-terraform-cloud" {
+  name                 = "sub-terraform-cloud"
+  resource_group_name  = azurerm_resource_group.rg-terraform-cloud.name
+  virtual_network_name = azurerm_virtual_network.vnet-terraform-cloud.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
+
+//agora precisamos criar um ip público para a nossa vm
+//link: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/public_ip
+resource "azurerm_public_ip" "ip-terraform-cloud" {
+  name                = "ip-terraform-cloud"
+  resource_group_name = azurerm_resource_group.rg-terraform-cloud.name
+  location            = azurerm_resource_group.rg-terraform-cloud.location
+  allocation_method   = "Static"
+
+  tags = {
+    environment = "Production"
+  }
+}
+
+//precisamos criar agora uma interface de rede
+//link: https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/network_interface
+
+resource "azurerm_network_interface" "nic-terraform-cloud" {
+  name                = "nic-terraform-cloud"
+  location            = azurerm_resource_group.rg-terraform-cloud.location
+  resource_group_name = azurerm_resource_group.rg-terraform-cloud.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.sub-terraform-cloud.id // nome da subrede no lugar de example
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.ip-terraform-cloud.id // precisamos pegar o ID do id público criado
+  }
+}
+
+//precisamos criar agora o network security group
+
+resource "azurerm_network_security_group" "nsg-terraform-cloud" {
+  name                = "nsg-terraform-cloud"
+  location            = azurerm_resource_group.rg-terraform-cloud.location
+  resource_group_name = azurerm_resource_group.rg-terraform-cloud.name
+
+  security_rule {
+    name                       = "SSH" // mudar conforme a regra
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22" // e a porta
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  //precisamos abrir essa porta para o nginx, firewall para a porta 80
+  security_rule {
+    name                       = "Web" // mudar conforme a regra
+    priority                   = 1001
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80" // e a porta
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  tags = {
+    environment = "Production"
+  }
+}
+
+
+//precisamos fazer a associação da segurança de rede agora, para isso procuramos o network interface security group association
+//link:
+//https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/network_interface_security_group_association
+
+resource "azurerm_network_interface_security_group_association" "nic-nsg-terraform-cloud" {
+  network_interface_id      = azurerm_network_interface.nic-terraform-cloud.id
+  network_security_group_id = azurerm_network_security_group.nsg-terraform-cloud.id
+}
+
+//precisamos agora criar a máquina virtual, temos vários tipos, porém vamos criar a Linux virtual machine
+resource "azurerm_linux_virtual_machine" "vm-terraform-cloud" {
+  name                            = "vm-terraform-cloud"
+  resource_group_name             = azurerm_resource_group.rg-terraform-cloud.name
+  location                        = azurerm_resource_group.rg-terraform-cloud.location
+  size                            = "Standard_DS1_v2" //para ver o tipo de máquina, pesquise "azure VM sizes"
+  admin_username                  = "adminuser"
+  admin_password                  = "Teste@123!"
+  disable_password_authentication = false
+  network_interface_ids = [
+    azurerm_network_interface.nic-terraform-cloud.id,
+  ]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "UbuntuServer"
+    sku       = "16.04-LTS"
+    version   = "latest"
+  }
+}
+
+
+//através deste script abaixo, vamos realizar a instalação na nossa máquina do NGINX
+
+resource "null_resource" "install-nginx" {
+  connection {
+    type     = "ssh"                                           // tipo de conexão
+    host     = azurerm_public_ip.ip-terraform-cloud.ip_address // endereço de ip da máquina após ela ser criada
+    user     = "adminuser"
+    password = "Teste@123!"
+  }
+
+  //precisamos criar um provisionario para realizar esta ação na máquina virtual
+  provisioner "remote-exec" {
+    inline = ["sudo apt update", "sudo apt install -y nginx"]
+  }
+
+  // como a máquina virtual não foi citada em momento algum, precisamos fazer com que 
+  // o programa sabe que dependemos de algo para executar a ação acima,
+  // portanto passaremos a opção da máquina virtual
+  depends_on = [azurerm_linux_virtual_machine.vm-terraform-cloud]
+}
